@@ -1,21 +1,37 @@
+version: '3.8'
+
 services:
   goboxd:
     build:
       context: .
+      dockerfile: Dockerfile
       target: runtime
     image: goboxd:dev
     container_name: goboxd
     ports:
       - "8080:8080"
     privileged: true
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    restart: unless-stopped
+    # Uncomment for faster development (live code reload)
+    # volumes:
+    #   - .:/app
 
+  # Development tools container (optional)
   tools:
     build:
       context: .
+      dockerfile: Dockerfile
       target: builder
     image: goboxd-tools:dev
+    container_name: goboxd-tools
     volumes:
       - .:/src
     working_dir: /src
-    profiles: ["tools"]
-    entrypoint: []
+    profiles:
+      - tools
+    tty: true
+    entrypoint: ["sleep", "infinity"]
