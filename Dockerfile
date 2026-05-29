@@ -72,6 +72,8 @@ WORKDIR /app
 
 COPY languages.yaml .
 
+COPY config/ /app/config/
+
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/goboxd"]
