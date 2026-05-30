@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -37,7 +38,21 @@ var Languages = make(map[string]Language)
 
 // LoadLanguages reads the YAML file and populates the global Languages map.
 func LoadLanguages(path string) error {
-	data, err := os.ReadFile(path)
+	// Try the provided path first, then walk up a few parent dirs to support
+	// running tests from package subdirectories.
+	var data []byte
+	var err error
+	tryPath := path
+	for i := 0; i < 4; i++ {
+		data, err = os.ReadFile(tryPath)
+		if err == nil {
+			break
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		tryPath = filepath.Join("..", tryPath)
+	}
 	if err != nil {
 		return err
 	}

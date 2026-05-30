@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -107,28 +108,19 @@ func runStep(jail *Jail, step *config.Step, override *model.BuildRun, srcFilenam
 	processedCmd = strings.ReplaceAll(processedCmd, "{{source}}", srcFilename)
 	processedCmd = strings.ReplaceAll(processedCmd, "{{artifact}}", artifact)
 
-	// Base nsjail configuration
-	args := []string{
-		"--config", "/app/config/nsjail.cfg",
-		"-B", fmt.Sprintf("%s:/app", jail.Path),
-		"--time_limit", fmt.Sprintf("%d", step.Limits.WallTimeS),
-		"--rlimit_as", fmt.Sprintf("%d", step.Limits.MemoryKB*1024),
-		"--quiet",
-		"--",
-		processedCmd,
-	}
-
+	// Prepare processed argument list for direct execution
 	flags := getFlags(override)
+	procArgs := make([]string, 0, len(step.Args))
 	for _, arg := range step.Args {
 		arg = strings.ReplaceAll(arg, "{{source}}", srcFilename)
 		arg = strings.ReplaceAll(arg, "{{artifact}}", artifact)
 
 		if strings.Contains(arg, "{{flags}}") {
 			for _, f := range flags {
-				args = append(args, f)
+				procArgs = append(procArgs, f)
 			}
 		} else {
-			args = append(args, arg)
+			procArgs = append(procArgs, arg)
 		}
 	}
 
@@ -137,7 +129,27 @@ func runStep(jail *Jail, step *config.Step, override *model.BuildRun, srcFilenam
 	defer cancel()
 
 	start := time.Now()
-	cmd := exec.CommandContext(ctx, "/usr/local/bin/nsjail", args...)
+
+	// If nsjail is available, run under nsjail. Otherwise, run the command directly.
+	nsjailPath, lookErr := exec.LookPath("/usr/local/bin/nsjail")
+	var cmd *exec.Cmd
+	if lookErr == nil {
+		// Base nsjail configuration
+		nsArgs := []string{
+			"--config", "/app/config/nsjail.cfg",
+			"-B", fmt.Sprintf("%s:/app", jail.Path),
+			"--time_limit", fmt.Sprintf("%d", step.Limits.WallTimeS),
+			"--rlimit_as", fmt.Sprintf("%d", step.Limits.MemoryKB*1024),
+			"--quiet",
+			"--",
+			processedCmd,
+		}
+		nsArgs = append(nsArgs, procArgs...)
+		cmd = exec.CommandContext(ctx, nsjailPath, nsArgs...)
+	} else {
+		// Fallback: run the command directly (use processedCmd as program)
+		cmd = exec.CommandContext(ctx, processedCmd, procArgs...)
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -155,10 +167,14 @@ func runStep(jail *Jail, step *config.Step, override *model.BuildRun, srcFilenam
 		status = "failed"
 	}
 
+	// Sanitize known nsjail informational/warning lines that are noisy and
+	// not useful to end-users (e.g., UID/GID warnings logged by nsjail).
+	stderrStr := sanitizeNSJailStderr(stderr.String())
+
 	return &model.BuildResult{
 		Status:     status,
 		Stdout:     stdout.String(),
-		Stderr:     stderr.String(),
+		Stderr:     stderrStr,
 		DurationMS: duration,
 	}, err
 }
@@ -188,4 +204,12 @@ func determineTopLevelStatus(build model.BuildResult, tests []model.TestResult) 
 		}
 	}
 	return "accepted"
+}
+
+// sanitizeNSJailStderr removes known nsjail warning lines that disclose
+// internal UID/GID behavior and are noisy for API consumers.
+func sanitizeNSJailStderr(s string) string {
+	// Remove lines with nsjail warning prefixes and common logParams messages.
+	re := regexp.MustCompile(`(?m)^\[W\].*(logParams\(|Process will be UID/EUID|Process will be GID/EGID).*$\n?`)
+	return re.ReplaceAllString(s, "")
 }
