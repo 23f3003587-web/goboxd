@@ -34,3 +34,31 @@ Provided updates to languages.go, languages.yaml, and a major refactor of execut
 
 **What we used / didn't use:**
 Used the core runStep abstraction and template replacement logic. Iterated multiple times to fix {{artifact}} in cmd, flag expansion, whitespace comparison, and nil safety on errors. Discarded versions that didn't handle build failure correctly.
+
+---
+
+## 2026-05-30 · Phase 4 - Testing, Validation & Polish
+
+**Prompt:**
+We have basic Python and C++ working. Help with Day 4: add global limits, improved validation, unit + integration tests, better error messages, and documentation (README, api.md, security.md).
+
+**Response summary:**
+Provided config.go with global limits, validator.go, filename_test.go, integration tests, improved run.go handler with proper JSON error responses, and basic documentation files.
+
+**What we used / didn't use:**
+Used the structure for tests and validation logic. Fixed several test failures caused by import issues and handler registration problems. Improved error handling and added request logging.
+
+---
+
+## 2026-05-30 · Phase 5 - Final Stabilization & Demo Readiness
+
+**Prompt:**
+Stage 1 is almost done. Help complete Day 5: add panic recovery middleware, /info and /readyz endpoints, output truncation (Hole 6), final documentation, and fix 404 errors on health endpoints.
+
+**Response summary:**
+Provided middleware.go, updated health.go with proper chi middleware, main.go with correct route registration, security.md updates, and final polish commands.
+
+**What we used / didn't use:**
+Used the middleware and endpoint implementations. Fixed bugs where /info and /readyz returned 404 (caused by incorrect middleware attachment and missing imports). Resolved chi handler registration issues and added RecoveryMiddleware. Also fixed docker-compose version warning.
+
+---

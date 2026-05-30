@@ -19,13 +19,13 @@ func TestRunEndpoint(t *testing.T) {
 		wantCode   string
 	}{
 		{
-			name: "python hello",
-			req: `{"language":"py3","source":"print('Hello World')","tests":[{"stdin":"","expected_stdout":"Hello World"}]}`,
+			name:       "python hello",
+			req:        `{"language":"py3","source":"print('Hello World')","tests":[{"stdin":"","expected_stdout":"Hello World"}]}`,
 			wantStatus: 200,
 		},
 		{
-			name: "bad filename",
-			req: `{"language":"py3","source_filename":"../../bad","source":"print(1)","tests":[{"stdin":"","expected_stdout":"1"}]}`,
+			name:       "bad filename",
+			req:        `{"language":"py3","source_filename":"../../bad","source":"print(1)","tests":[{"stdin":"","expected_stdout":"1"}]}`,
 			wantStatus: 400,
 		},
 	}

@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   goboxd:
     build:
@@ -16,11 +14,11 @@ services:
     security_opt:
       - apparmor:unconfined
     restart: unless-stopped
-    # Uncomment for faster development (live code reload)
+    # Uncomment for faster development (live reload during coding)
     # volumes:
     #   - .:/app
 
-  # Development tools container (optional)
+  # Optional tools container for running tests, go commands, etc.
   tools:
     build:
       context: .
@@ -35,3 +33,8 @@ services:
       - tools
     tty: true
     entrypoint: ["sleep", "infinity"]
+
+# Optional: Global settings
+networks:
+  default:
+    name: goboxd_network

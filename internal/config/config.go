@@ -8,10 +8,10 @@ import (
 )
 
 type GlobalConfig struct {
-	MaxSourceBytes   int           `yaml:"max_source_bytes"`
-	MaxTests         int           `yaml:"max_tests"`
-	MaxConcurrentJobs int          `yaml:"max_concurrent_jobs"`
-	RequestTimeout   time.Duration `yaml:"request_timeout"`
+	MaxSourceBytes    int           `yaml:"max_source_bytes"`
+	MaxTests          int           `yaml:"max_tests"`
+	MaxConcurrentJobs int           `yaml:"max_concurrent_jobs"`
+	RequestTimeout    time.Duration `yaml:"request_timeout"`
 }
 
 var Global = GlobalConfig{

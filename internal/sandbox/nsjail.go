@@ -20,7 +20,7 @@ func (n *Nsjail) Run(cmd string, args []string) error {
 	// 1. Clean the arguments to catch and fix double-slashes or empty variables
 	var cleanedArgs []string
 	for _, arg := range args {
-		// If an argument looks like "//solution.py", clean it to "/app/solution.py" 
+		// If an argument looks like "//solution.py", clean it to "/app/solution.py"
 		// because /tmp/goboxd-jail-xxx is mounted at /app inside the chroot.
 		if strings.HasPrefix(arg, "//") {
 			arg = "/app/" + strings.TrimPrefix(arg, "//")

@@ -16,8 +16,8 @@ type BuildRun struct {
 }
 
 type Limits struct {
-	WallTimeS   int `json:"wall_time_s"`
-	MemoryKB    int `json:"memory_kb"`
+	WallTimeS    int `json:"wall_time_s"`
+	MemoryKB     int `json:"memory_kb"`
 	MaxProcesses int `json:"max_processes"`
 }
 

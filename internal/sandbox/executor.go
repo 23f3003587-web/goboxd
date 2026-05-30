@@ -13,7 +13,7 @@ import (
 	"github.com/thesouldev/goboxd/internal/model"
 )
 
-// Execute handles the end-to-end sandbox pipeline: writing the file, 
+// Execute handles the end-to-end sandbox pipeline: writing the file,
 // optional compilation, running all test cases, and aggregating statuses.
 func Execute(req model.RunRequest) (*model.RunResponse, error) {
 	lang, exists := config.GetLanguage(req.Language)
@@ -210,6 +210,6 @@ func determineTopLevelStatus(build model.BuildResult, tests []model.TestResult) 
 // internal UID/GID behavior and are noisy for API consumers.
 func sanitizeNSJailStderr(s string) string {
 	// Remove lines with nsjail warning prefixes and common logParams messages.
-	re := regexp.MustCompile(`(?m)^\[W\].*(logParams\(|Process will be UID/EUID|Process will be GID/EGID).*$\n?`)
-	return re.ReplaceAllString(s, "")
+	re := regexp.MustCompile(`(?m)^.*(?:\[W\].*logParams\(|Process will be UID/EUID|Process will be GID/EGID).*$\r?\n?`)
+	return strings.TrimSpace(re.ReplaceAllString(s, ""))
 }
