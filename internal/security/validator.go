@@ -16,6 +16,16 @@ func ValidateRunRequest(req model.RunRequest) error {
 	if err := ValidateFilename(req.ArtifactFilename); err != nil {
 		return err
 	}
-	// TODO: Flag validation (Hole 3) - expand later
+	// Flag validation (Hole 3) - validates against language's flag_allowlist
+	if req.Build != nil && len(req.Build.Flags) > 0 {
+		if err := ValidateBuildFlags(req.Language, req.Build.Flags); err != nil {
+			return err
+		}
+	}
+	if req.Run != nil && len(req.Run.Flags) > 0 {
+		if err := ValidateRunFlags(req.Language, req.Run.Flags); err != nil {
+			return err
+		}
+	}
 	return nil
 }

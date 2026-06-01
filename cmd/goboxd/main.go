@@ -25,13 +25,14 @@ func main() {
 		log.Fatalf("❌ Failed to load config: %v", err)
 	}
 
+	handler.InitializeConcurrency()
+
 	// 2. Setup Router & Middleware
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
+	r.Use(handler.RecoveryMiddleware)
 
 	// 3. Define Routes
 	// Standardized naming convention; removed redundant wildcards/typo paths.

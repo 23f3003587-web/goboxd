@@ -1,9 +1,13 @@
-# API Reference
-
-## POST /run
-Execute code in sandbox.
-
-See full spec in the judging brief.
+# API Documentation
 
 ## GET /healthz
-Health check.
+Health check. Returns 200 {"status":"ok"}
+
+## GET /readyz
+Readiness probe.
+
+## GET /info
+System information.
+
+## POST /run
+Executes code in sandbox. See full contract in the hackathon brief.

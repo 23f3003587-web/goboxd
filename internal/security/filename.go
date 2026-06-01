@@ -2,6 +2,7 @@ package security
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -13,6 +14,9 @@ func ValidateFilename(name string) error {
 		return fmt.Errorf("filename too long")
 	}
 	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+		return fmt.Errorf("invalid filename: directory traversal detected")
+	}
+	if filepath.Base(name) != name || filepath.Clean(name) != name {
 		return fmt.Errorf("invalid filename: directory traversal detected")
 	}
 	if strings.HasPrefix(name, ".") || strings.Contains(name, "\x00") {

@@ -3,15 +3,27 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/thesouldev/goboxd/internal/config"
 	"github.com/thesouldev/goboxd/internal/model"
 )
+
+type ExecutionResult struct {
+	Status       string
+	Stdout       string
+	Stderr       string
+	DurationMS   int
+	MemoryPeakKB int
+}
 
 // Execute handles the end-to-end sandbox pipeline: writing the file,
 // optional compilation, running all test cases, and aggregating statuses.
@@ -32,6 +44,11 @@ func Execute(req model.RunRequest) (*model.RunResponse, error) {
 		srcFilename = req.SourceFilename
 	}
 
+	artifact := lang.Artifact
+	if req.ArtifactFilename != "" {
+		artifact = req.ArtifactFilename
+	}
+
 	if err := jail.WriteSource(srcFilename, req.Source); err != nil {
 		return nil, fmt.Errorf("failed to write source: %w", err)
 	}
@@ -40,56 +57,64 @@ func Execute(req model.RunRequest) (*model.RunResponse, error) {
 		Build: model.BuildResult{Status: "ok"},
 	}
 
-	// BUILD STEP (Conditional on language config)
 	if lang.Build != nil {
-		buildRes, err := runStep(jail, lang.Build, req.Build, srcFilename, lang.Artifact, "")
-		resp.Build = *buildRes
-		if err != nil || buildRes.Status != "ok" {
+		buildRes, err := runStep(jail, lang.Build, req.Build, srcFilename, artifact, "")
+		resp.Build = model.BuildResult{
+			Status:     buildRes.Status,
+			Stdout:     buildRes.Stdout,
+			Stderr:     buildRes.Stderr,
+			DurationMS: buildRes.DurationMS,
+		}
+		if err != nil {
+			return nil, err
+		}
+		if resp.Build.Status != "ok" {
+			resp.Build.Status = "failed"
 			resp.Status = "build_failed"
 			resp.Tests = createNotExecutedTests(req.Tests)
 			return resp, nil
 		}
 	}
 
-	// RUN STEP - Sequentially runs every individual test case
 	testResults := make([]model.TestResult, 0, len(req.Tests))
 	for _, test := range req.Tests {
-		runRes, err := runStep(jail, &lang.Run, req.Run, srcFilename, lang.Artifact, test.Stdin)
+		runRes, err := runStep(jail, &lang.Run, req.Run, srcFilename, artifact, test.Stdin)
 		if err != nil {
-			stderr := ""
-			if runRes != nil {
-				stderr = runRes.Stderr
-			}
-			testResults = append(testResults, model.TestResult{
-				Status: "runtime_error",
-				Stderr: stderr,
-			})
-			continue
+			return nil, err
 		}
 
 		result := model.TestResult{
-			Status:     "accepted",
-			Stdout:     runRes.Stdout,
-			Stderr:     runRes.Stderr,
-			DurationMS: runRes.DurationMS,
+			Stdout:       runRes.Stdout,
+			Stderr:       runRes.Stderr,
+			DurationMS:   runRes.DurationMS,
+			MemoryPeakKB: runRes.MemoryPeakKB,
 		}
 
-		// Comprehensive Status Diff Checker Logic
+		if runRes.Status != "ok" {
+			switch runRes.Status {
+			case "time_exceeded":
+				result.Status = "time_exceeded"
+			case "memory_exceeded":
+				result.Status = "memory_exceeded"
+			default:
+				result.Status = "runtime_error"
+			}
+			testResults = append(testResults, result)
+			continue
+		}
+
 		rawExpected := strings.TrimSpace(test.ExpectedStdout)
 		rawActual := strings.TrimSpace(runRes.Stdout)
-
 		normalize := func(s string) string {
 			return strings.Join(strings.Fields(s), " ")
 		}
 
-		if rawExpected != "" {
-			if rawActual == rawExpected {
-				result.Status = "accepted"
-			} else if normalize(rawActual) == normalize(rawExpected) {
-				result.Status = "output_whitespace_mismatch"
-			} else {
-				result.Status = "wrong_output"
-			}
+		if rawExpected == rawActual {
+			result.Status = "accepted"
+		} else if normalize(rawActual) == normalize(rawExpected) {
+			result.Status = "output_whitespace_mismatch"
+		} else {
+			result.Status = "wrong_output"
 		}
 
 		testResults = append(testResults, result)
@@ -97,86 +122,148 @@ func Execute(req model.RunRequest) (*model.RunResponse, error) {
 
 	resp.Tests = testResults
 	resp.Status = determineTopLevelStatus(resp.Build, resp.Tests)
-
 	return resp, nil
 }
 
-// runStep maps configurations and wraps an execution command within an nsjail process isolation layer
-func runStep(jail *Jail, step *config.Step, override *model.BuildRun, srcFilename, artifact, stdin string) (*model.BuildResult, error) {
-	// Process template variables in the command
-	processedCmd := step.Cmd
-	processedCmd = strings.ReplaceAll(processedCmd, "{{source}}", srcFilename)
-	processedCmd = strings.ReplaceAll(processedCmd, "{{artifact}}", artifact)
+// runStep maps configurations and wraps an execution command within an nsjail process isolation layer.
+func runStep(jail *Jail, step *config.Step, override *model.BuildRun, srcFilename, artifact, stdin string) (*ExecutionResult, error) {
+	processedCmd := processTemplate(step.Cmd, srcFilename, artifact)
 
-	// Prepare processed argument list for direct execution
 	flags := getFlags(override)
 	procArgs := make([]string, 0, len(step.Args))
 	for _, arg := range step.Args {
-		arg = strings.ReplaceAll(arg, "{{source}}", srcFilename)
-		arg = strings.ReplaceAll(arg, "{{artifact}}", artifact)
-
+		arg = processTemplate(arg, srcFilename, artifact)
 		if strings.Contains(arg, "{{flags}}") {
-			for _, f := range flags {
-				procArgs = append(procArgs, f)
-			}
+			procArgs = append(procArgs, flags...)
 		} else {
 			procArgs = append(procArgs, arg)
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(),
-		time.Duration(step.Limits.WallTimeS)*time.Second+3*time.Second)
+	limits := mergeLimits(step.Limits, override)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(limits.WallTimeS)*time.Second+3*time.Second)
 	defer cancel()
 
 	start := time.Now()
 
-	// If nsjail is available, run under nsjail. Otherwise, run the command directly.
 	nsjailPath, lookErr := exec.LookPath("/usr/local/bin/nsjail")
-	var cmd *exec.Cmd
-	if lookErr == nil {
-		// Base nsjail configuration
-		nsArgs := []string{
-			"--config", "/app/config/nsjail.cfg",
-			"-B", fmt.Sprintf("%s:/app", jail.Path),
-			"--time_limit", fmt.Sprintf("%d", step.Limits.WallTimeS),
-			"--rlimit_as", fmt.Sprintf("%d", step.Limits.MemoryKB*1024),
-			"--quiet",
-			"--",
-			processedCmd,
-		}
-		nsArgs = append(nsArgs, procArgs...)
-		cmd = exec.CommandContext(ctx, nsjailPath, nsArgs...)
-	} else {
-		// Fallback: run the command directly (use processedCmd as program)
-		cmd = exec.CommandContext(ctx, processedCmd, procArgs...)
+	if lookErr != nil {
+		return nil, fmt.Errorf("nsjail binary not found: %w", lookErr)
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	nsArgs := []string{
+		"--config", "/app/config/nsjail.cfg",
+		"-B", fmt.Sprintf("%s:/app", jail.Path),
+		"--cwd", "/app",
+		"--time_limit", fmt.Sprintf("%d", limits.WallTimeS),
+		"--rlimit_as", fmt.Sprintf("%d", limits.MemoryKB*1024),
+		"--rlimit_fsize", fmt.Sprintf("%d", config.Global.MaxOutputBytes),
+	}
+	if limits.MaxProcesses > 0 {
+		nsArgs = append(nsArgs, "--rlimit_nproc", fmt.Sprintf("%d", limits.MaxProcesses))
+	}
+	nsArgs = append(nsArgs,
+		"--",
+		processedCmd,
+	)
+	nsArgs = append(nsArgs, procArgs...)
+	cmd := exec.CommandContext(ctx, nsjailPath, nsArgs...)
 
+	stdoutWriter := newTruncatingWriter(config.Global.MaxOutputBytes)
+	stderrWriter := newTruncatingWriter(config.Global.MaxOutputBytes)
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
 
 	err := cmd.Run()
 	duration := int(time.Since(start).Milliseconds())
+	status := mapExecutionStatus(err, ctx)
 
-	status := "ok"
-	if err != nil {
-		status = "failed"
+	stdoutStr := stdoutWriter.String()
+	if stdoutWriter.Truncated() {
+		stdoutStr += "\n\n[OUTPUT TRUNCATED - exceeded " + fmt.Sprintf("%d bytes limit", config.Global.MaxOutputBytes) + "]"
+	}
+	stderrStr := sanitizeNSJailStderr(stderrWriter.String())
+	if stderrWriter.Truncated() {
+		stderrStr += "\n\n[OUTPUT TRUNCATED - exceeded " + fmt.Sprintf("%d bytes limit", config.Global.MaxOutputBytes) + "]"
+	}
+	memoryPeak := getMemoryPeakKB(cmd.ProcessState)
+
+	result := &ExecutionResult{
+		Status:       status,
+		Stdout:       stdoutStr,
+		Stderr:       stderrStr,
+		DurationMS:   duration,
+		MemoryPeakKB: memoryPeak,
 	}
 
-	// Sanitize known nsjail informational/warning lines that are noisy and
-	// not useful to end-users (e.g., UID/GID warnings logged by nsjail).
-	stderrStr := sanitizeNSJailStderr(stderr.String())
+	if err != nil {
+		if status == "internal_error" {
+			return result, err
+		}
+		return result, nil
+	}
 
-	return &model.BuildResult{
-		Status:     status,
-		Stdout:     stdout.String(),
-		Stderr:     stderrStr,
-		DurationMS: duration,
-	}, err
+	return result, nil
+}
+
+func processTemplate(value, source, artifact string) string {
+	value = strings.ReplaceAll(value, "{{source}}", source)
+	value = strings.ReplaceAll(value, "{{artifact}}", artifact)
+	return value
+}
+
+func mergeLimits(base config.Limits, override *model.BuildRun) config.Limits {
+	if override == nil {
+		return base
+	}
+	if override.Limits.WallTimeS > 0 {
+		base.WallTimeS = override.Limits.WallTimeS
+	}
+	if override.Limits.MemoryKB > 0 {
+		base.MemoryKB = override.Limits.MemoryKB
+	}
+	if override.Limits.MaxProcesses > 0 {
+		base.MaxProcesses = override.Limits.MaxProcesses
+	}
+	return base
+}
+
+func mapExecutionStatus(err error, ctx context.Context) string {
+	if err == nil {
+		return "ok"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "time_exceeded"
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+			if status.Signaled() {
+				if status.Signal() == syscall.SIGKILL {
+					return "memory_exceeded"
+				}
+				return "runtime_error"
+			}
+			if status.ExitStatus() != 0 {
+				return "runtime_error"
+			}
+		}
+		return "runtime_error"
+	}
+	return "internal_error"
+}
+
+func getMemoryPeakKB(ps *os.ProcessState) int {
+	if ps == nil {
+		return 0
+	}
+	if usage, ok := ps.SysUsage().(*syscall.Rusage); ok {
+		return int(usage.Maxrss)
+	}
+	return 0
 }
 
 func getFlags(override *model.BuildRun) []string {
@@ -200,7 +287,7 @@ func determineTopLevelStatus(build model.BuildResult, tests []model.TestResult) 
 	}
 	for _, t := range tests {
 		if t.Status != "accepted" {
-			return t.Status // Bubble up the first failing test status (e.g., wrong_output, runtime_error)
+			return t.Status
 		}
 	}
 	return "accepted"
@@ -209,7 +296,113 @@ func determineTopLevelStatus(build model.BuildResult, tests []model.TestResult) 
 // sanitizeNSJailStderr removes known nsjail warning lines that disclose
 // internal UID/GID behavior and are noisy for API consumers.
 func sanitizeNSJailStderr(s string) string {
-	// Remove lines with nsjail warning prefixes and common logParams messages.
 	re := regexp.MustCompile(`(?m)^.*(?:\[W\].*logParams\(|Process will be UID/EUID|Process will be GID/EGID).*$\r?\n?`)
 	return strings.TrimSpace(re.ReplaceAllString(s, ""))
+}
+
+// truncateOutput caps output at maxBytes and adds a truncation marker if exceeded
+// (Hole 6 mitigation: prevents OOM from runaway programs)
+func truncateOutput(output string, maxBytes int) string {
+	if len(output) > maxBytes {
+		truncationMarker := "\n\n[OUTPUT TRUNCATED - exceeded " + fmt.Sprintf("%d bytes limit", maxBytes) + "]"
+		return output[:maxBytes] + truncationMarker
+	}
+	return output
+}
+
+type truncatingWriter struct {
+	buf       bytes.Buffer
+	maxBytes  int
+	truncated bool
+}
+
+func newTruncatingWriter(maxBytes int) *truncatingWriter {
+	return &truncatingWriter{maxBytes: maxBytes}
+}
+
+func (w *truncatingWriter) Write(p []byte) (int, error) {
+	if w.truncated {
+		return len(p), nil
+	}
+	remaining := w.maxBytes - w.buf.Len()
+	if remaining <= 0 {
+		w.truncated = true
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		_, _ = w.buf.Write(p[:remaining])
+		w.truncated = true
+	} else {
+		_, _ = w.buf.Write(p)
+	}
+	return len(p), nil
+}
+
+func (w *truncatingWriter) String() string {
+	return w.buf.String()
+}
+
+func (w *truncatingWriter) Truncated() bool {
+	return w.truncated
+}
+
+func LanguageVersion(lang config.Language) string {
+	cmdPath := lang.Run.Cmd
+	if lang.Build != nil {
+		cmdPath = lang.Build.Cmd
+	}
+	program, err := exec.LookPath(cmdPath)
+	if err != nil {
+		return "unknown"
+	}
+	versionCmd := exec.Command(program, "--version")
+	output, err := versionCmd.CombinedOutput()
+	if err != nil {
+		return strings.TrimSpace(string(output))
+	}
+	return strings.TrimSpace(strings.SplitN(string(output), "\n", 2)[0])
+}
+
+func ProbeLanguage(lang config.Language) error {
+	jail, err := NewJail()
+	if err != nil {
+		return err
+	}
+	defer jail.Cleanup()
+
+	source := getProbeSource(lang.SourceFilename)
+	if err := jail.WriteSource(lang.SourceFilename, source); err != nil {
+		return err
+	}
+
+	if lang.Build != nil {
+		buildRes, err := runStep(jail, lang.Build, nil, lang.SourceFilename, lang.Artifact, "")
+		if err != nil {
+			return err
+		}
+		if buildRes.Status != "ok" {
+			return fmt.Errorf("build probe failed: %s", buildRes.Stderr)
+		}
+	}
+
+	runRes, err := runStep(jail, &lang.Run, nil, lang.SourceFilename, lang.Artifact, "")
+	if err != nil {
+		return err
+	}
+	if runRes.Status != "ok" {
+		return fmt.Errorf("run probe failed: %s", runRes.Stderr)
+	}
+	return nil
+}
+
+func getProbeSource(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".py":
+		return "print('ok')\n"
+	case ".cpp", ".cc", ".c":
+		return "#include <iostream>\nint main(){std::cout<<\"ok\";return 0;}\n"
+	default:
+		return "print('ok')\n"
+	}
 }

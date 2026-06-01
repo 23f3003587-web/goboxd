@@ -17,6 +17,10 @@
 
 goboxd is an HTTP service written in Go that compiles and runs untrusted code inside isolated sandboxes and returns the result. Optional test cases can be supplied to assert behaviour against expected output. It is built for safe execution of code across many languages, with strict isolation, bounded concurrency, and a plug and play language registry.
 
+## Framework
+
+We chose [chi](https://github.com/go-chi/chi) as the router because it is lightweight, has excellent middleware support, and adds almost no overhead compared to net/http.
+
 ## Features
 
 - Plug and play language registry driven by YAML

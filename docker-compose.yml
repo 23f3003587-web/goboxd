@@ -14,27 +14,26 @@ services:
     security_opt:
       - apparmor:unconfined
     restart: unless-stopped
-    # Uncomment for faster development (live reload during coding)
     # volumes:
-    #   - .:/app
+    #   - .:/app   # Uncomment for live reload during dev
 
-  # Optional tools container for running tests, go commands, etc.
+  # Tools container for make test / lint / integration
   tools:
     build:
       context: .
       dockerfile: Dockerfile
-      target: builder
+      target: tools
     image: goboxd-tools:dev
-    container_name: goboxd-tools
+    profiles: ["tools"]
+    working_dir: /app
     volumes:
-      - .:/src
-    working_dir: /src
-    profiles:
-      - tools
+      - .:/app:ro
+    # NO entrypoint or command override — this fixes the sleep error
     tty: true
-    entrypoint: ["sleep", "infinity"]
+    depends_on:
+      - goboxd
 
-# Optional: Global settings
 networks:
   default:
     name: goboxd_network
+    driver: bridge
