@@ -162,11 +162,9 @@ func runStep(jail *Jail, step *config.Step, override *model.BuildRun, srcFilenam
 	if limits.MaxProcesses > 0 {
 		nsArgs = append(nsArgs, "--rlimit_nproc", fmt.Sprintf("%d", limits.MaxProcesses))
 	}
-	nsArgs = append(nsArgs,
-		"--",
-		processedCmd,
-	)
+	nsArgs = append(nsArgs, "--", processedCmd)
 	nsArgs = append(nsArgs, procArgs...)
+
 	cmd := exec.CommandContext(ctx, nsjailPath, nsArgs...)
 
 	stdoutWriter := newTruncatingWriter(config.Global.MaxOutputBytes)
@@ -183,11 +181,11 @@ func runStep(jail *Jail, step *config.Step, override *model.BuildRun, srcFilenam
 
 	stdoutStr := stdoutWriter.String()
 	if stdoutWriter.Truncated() {
-		stdoutStr += "\n\n[OUTPUT TRUNCATED - exceeded " + fmt.Sprintf("%d bytes limit", config.Global.MaxOutputBytes) + "]"
+		stdoutStr += fmt.Sprintf("\n\n[OUTPUT TRUNCATED - exceeded %d bytes limit]", config.Global.MaxOutputBytes)
 	}
 	stderrStr := sanitizeNSJailStderr(stderrWriter.String())
 	if stderrWriter.Truncated() {
-		stderrStr += "\n\n[OUTPUT TRUNCATED - exceeded " + fmt.Sprintf("%d bytes limit", config.Global.MaxOutputBytes) + "]"
+		stderrStr += fmt.Sprintf("\n\n[OUTPUT TRUNCATED - exceeded %d bytes limit]", config.Global.MaxOutputBytes)
 	}
 	memoryPeak := getMemoryPeakKB(cmd.ProcessState)
 
@@ -199,13 +197,9 @@ func runStep(jail *Jail, step *config.Step, override *model.BuildRun, srcFilenam
 		MemoryPeakKB: memoryPeak,
 	}
 
-	if err != nil {
-		if status == "internal_error" {
-			return result, err
-		}
-		return result, nil
+	if err != nil && status == "internal_error" {
+		return result, err
 	}
-
 	return result, nil
 }
 
@@ -293,22 +287,157 @@ func determineTopLevelStatus(build model.BuildResult, tests []model.TestResult) 
 	return "accepted"
 }
 
-// sanitizeNSJailStderr removes known nsjail warning lines that disclose
-// internal UID/GID behavior and are noisy for API consumers.
+// sanitizeNSJailStderr removes known nsjail info/warning lines that are
+// noisy for API consumers.
 func sanitizeNSJailStderr(s string) string {
 	re := regexp.MustCompile(`(?m)^.*(?:\[W\].*logParams\(|Process will be UID/EUID|Process will be GID/EGID).*$\r?\n?`)
 	return strings.TrimSpace(re.ReplaceAllString(s, ""))
 }
 
-// truncateOutput caps output at maxBytes and adds a truncation marker if exceeded
-// (Hole 6 mitigation: prevents OOM from runaway programs)
+// truncateOutput caps output at maxBytes (kept for potential direct use).
 func truncateOutput(output string, maxBytes int) string {
 	if len(output) > maxBytes {
-		truncationMarker := "\n\n[OUTPUT TRUNCATED - exceeded " + fmt.Sprintf("%d bytes limit", maxBytes) + "]"
-		return output[:maxBytes] + truncationMarker
+		return output[:maxBytes] + fmt.Sprintf("\n\n[OUTPUT TRUNCATED - exceeded %d bytes limit]", maxBytes)
 	}
 	return output
 }
+
+// ── Version detection ─────────────────────────────────────────────────────────
+
+// versionFlags maps binary names to the flag they use to print their version.
+// Most tools use --version; exceptions are listed here.
+var versionFlags = map[string]string{
+	"iverilog": "-V",
+	"vvp":      "-v",
+	"java":     "-version",
+	"lua":      "-v",
+	"lua5.3":   "-v",
+	"lua5.4":   "-v",
+}
+
+// LanguageVersion returns the first line of the compiler/interpreter version string.
+func LanguageVersion(lang config.Language) string {
+	cmdPath := lang.Run.Cmd
+	if lang.Build != nil {
+		cmdPath = lang.Build.Cmd
+	}
+
+	program, err := exec.LookPath(cmdPath)
+	if err != nil {
+		return "unknown"
+	}
+
+	binary := filepath.Base(program)
+	flag := "--version"
+	if override, ok := versionFlags[binary]; ok {
+		flag = override
+	}
+
+	output, err := exec.Command(program, flag).CombinedOutput()
+	out := strings.TrimSpace(string(output))
+	if err != nil {
+		// Some tools (e.g. java -version) write to stderr and exit 0 or 1 —
+		// return whatever they printed rather than "unknown".
+		if out != "" {
+			return strings.SplitN(out, "\n", 2)[0]
+		}
+		return "unknown"
+	}
+	return strings.SplitN(out, "\n", 2)[0]
+}
+
+// ── Language probing ──────────────────────────────────────────────────────────
+
+// probeSnippets maps file extensions to minimal valid source that just prints "ok".
+var probeSnippets = map[string]string{
+	".py":   "print('ok')\n",
+	".js":   "console.log('ok');\n",
+	".sh":   "echo ok\n",
+	".cpp":  "#include <stdio.h>\nint main(){puts(\"ok\");return 0;}\n",
+	".cc":   "#include <stdio.h>\nint main(){puts(\"ok\");return 0;}\n",
+	".c":    "#include <stdio.h>\nint main(){puts(\"ok\");return 0;}\n",
+	".java": "public class Solution{public static void main(String[] a){System.out.println(\"ok\");}}\n",
+	".v":    "module probe;initial begin $display(\"ok\");$finish;end endmodule\n",
+	".lua":  "print('ok')\n",
+}
+
+// probeFilename returns a safe concrete filename for languages that use
+// source_filename_strategy: from_request (e.g. Java).
+func probeFilename(lang config.Language) string {
+	if lang.SourceFilename != "" {
+		return lang.SourceFilename
+	}
+	// Derive a safe default from the run/build command name.
+	cmdPath := lang.Run.Cmd
+	if lang.Build != nil {
+		cmdPath = lang.Build.Cmd
+	}
+	switch filepath.Base(cmdPath) {
+	case "javac":
+		return "Solution.java"
+	case "node":
+		return "solution.js"
+	case "bash", "sh":
+		return "solution.sh"
+	case "lua", "lua5.3", "lua5.4":
+		return "solution.lua"
+	default:
+		return "solution.txt"
+	}
+}
+
+// probeArtifact returns a safe artifact name for probe runs.
+func probeArtifact(lang config.Language, srcFilename string) string {
+	if lang.Artifact != "" {
+		return lang.Artifact
+	}
+	// Java: artifact is the class name (filename without extension).
+	ext := filepath.Ext(srcFilename)
+	return strings.TrimSuffix(filepath.Base(srcFilename), ext)
+}
+
+// ProbeLanguage runs a minimal smoke test for a language inside a real jail.
+func ProbeLanguage(lang config.Language) error {
+	jail, err := NewJail()
+	if err != nil {
+		return err
+	}
+	defer jail.Cleanup()
+
+	srcFilename := probeFilename(lang)
+	artifact := probeArtifact(lang, srcFilename)
+
+	ext := strings.ToLower(filepath.Ext(srcFilename))
+	source, ok := probeSnippets[ext]
+	if !ok {
+		source = "echo ok\n" // safe fallback
+	}
+
+	if err := jail.WriteSource(srcFilename, source); err != nil {
+		return fmt.Errorf("probe write failed: %w", err)
+	}
+
+	if lang.Build != nil {
+		buildRes, err := runStep(jail, lang.Build, nil, srcFilename, artifact, "")
+		if err != nil {
+			return fmt.Errorf("probe build error: %w", err)
+		}
+		if buildRes.Status != "ok" {
+			return fmt.Errorf("probe build failed: %s", buildRes.Stderr)
+		}
+	}
+
+	runRes, err := runStep(jail, &lang.Run, nil, srcFilename, artifact, "")
+	if err != nil {
+		return fmt.Errorf("probe run error: %w", err)
+	}
+	if runRes.Status != "ok" {
+		return fmt.Errorf("probe run failed: %s", runRes.Stderr)
+	}
+	return nil
+}
+
+// ── Truncating writer ─────────────────────────────────────────────────────────
 
 type truncatingWriter struct {
 	buf       bytes.Buffer
@@ -338,71 +467,5 @@ func (w *truncatingWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (w *truncatingWriter) String() string {
-	return w.buf.String()
-}
-
-func (w *truncatingWriter) Truncated() bool {
-	return w.truncated
-}
-
-func LanguageVersion(lang config.Language) string {
-	cmdPath := lang.Run.Cmd
-	if lang.Build != nil {
-		cmdPath = lang.Build.Cmd
-	}
-	program, err := exec.LookPath(cmdPath)
-	if err != nil {
-		return "unknown"
-	}
-	versionCmd := exec.Command(program, "--version")
-	output, err := versionCmd.CombinedOutput()
-	if err != nil {
-		return strings.TrimSpace(string(output))
-	}
-	return strings.TrimSpace(strings.SplitN(string(output), "\n", 2)[0])
-}
-
-func ProbeLanguage(lang config.Language) error {
-	jail, err := NewJail()
-	if err != nil {
-		return err
-	}
-	defer jail.Cleanup()
-
-	source := getProbeSource(lang.SourceFilename)
-	if err := jail.WriteSource(lang.SourceFilename, source); err != nil {
-		return err
-	}
-
-	if lang.Build != nil {
-		buildRes, err := runStep(jail, lang.Build, nil, lang.SourceFilename, lang.Artifact, "")
-		if err != nil {
-			return err
-		}
-		if buildRes.Status != "ok" {
-			return fmt.Errorf("build probe failed: %s", buildRes.Stderr)
-		}
-	}
-
-	runRes, err := runStep(jail, &lang.Run, nil, lang.SourceFilename, lang.Artifact, "")
-	if err != nil {
-		return err
-	}
-	if runRes.Status != "ok" {
-		return fmt.Errorf("run probe failed: %s", runRes.Stderr)
-	}
-	return nil
-}
-
-func getProbeSource(filename string) string {
-	ext := strings.ToLower(filepath.Ext(filename))
-	switch ext {
-	case ".py":
-		return "print('ok')\n"
-	case ".cpp", ".cc", ".c":
-		return "#include <iostream>\nint main(){std::cout<<\"ok\";return 0;}\n"
-	default:
-		return "print('ok')\n"
-	}
-}
+func (w *truncatingWriter) String() string  { return w.buf.String() }
+func (w *truncatingWriter) Truncated() bool { return w.truncated }

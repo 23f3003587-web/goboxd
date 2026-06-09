@@ -97,3 +97,19 @@ func matchesPattern(flag, pattern string) bool {
 
 	return false
 }
+
+// ValidateFlags validates flags against a given allowlist (generic, used by validator)
+func ValidateFlags(flags []string, allowlist []string) error {
+	if len(flags) == 0 {
+		return nil
+	}
+	if len(allowlist) == 0 {
+		return fmt.Errorf("no flags are allowed for this language/phase")
+	}
+	for _, flag := range flags {
+		if !isFlagAllowed(flag, allowlist) {
+			return fmt.Errorf("flag '%s' is not in the allowlist", flag)
+		}
+	}
+	return nil
+}

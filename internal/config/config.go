@@ -11,22 +11,22 @@ import (
 )
 
 type GlobalConfig struct {
-	MaxSourceBytes        int           `yaml:"max_source_bytes"`
-	MaxTests              int           `yaml:"max_tests"`
-	MaxTestStdinBytes     int           `yaml:"max_test_stdin_bytes"`
-	MaxExpectedStdoutBytes int          `yaml:"max_expected_stdout_bytes"`
-	MaxRequestBytes       int           `yaml:"max_request_bytes"`
-	MaxConcurrentJobs     int           `yaml:"max_concurrent_jobs"`
-	RequestTimeout        time.Duration `yaml:"request_timeout"`
-	MaxOutputBytes        int           `yaml:"max_output_bytes"`
+	MaxSourceBytes         int           `yaml:"max_source_bytes"`
+	MaxTests               int           `yaml:"max_tests"`
+	MaxTestStdinBytes      int           `yaml:"max_test_stdin_bytes"`
+	MaxExpectedStdoutBytes int           `yaml:"max_expected_stdout_bytes"`
+	MaxRequestBytes        int           `yaml:"max_request_bytes"`
+	MaxConcurrentJobs      int           `yaml:"max_concurrent_jobs"`
+	RequestTimeout         time.Duration `yaml:"request_timeout"`
+	MaxOutputBytes         int           `yaml:"max_output_bytes"`
 }
 
 var Global = GlobalConfig{
-	MaxSourceBytes:        256 * 1024, // 256 KiB
-	MaxTests:              50,
-	MaxTestStdinBytes:     16 * 1024, // 16 KiB per stdin
-	MaxExpectedStdoutBytes: 64 * 1024, // 64 KiB per expected stdout
-	MaxRequestBytes:       2 * 1024 * 1024, // 2 MiB total request body
+	MaxSourceBytes:         256 * 1024, // 256 KiB
+	MaxTests:               50,
+	MaxTestStdinBytes:      16 * 1024,       // 16 KiB per stdin
+	MaxExpectedStdoutBytes: 64 * 1024,       // 64 KiB per expected stdout
+	MaxRequestBytes:        2 * 1024 * 1024, // 2 MiB total request body
 	MaxConcurrentJobs: func() int {
 		n := runtime.NumCPU()
 		if n < 1 {
@@ -56,6 +56,9 @@ func LoadConfig() error {
 }
 
 func ValidateRequest(req model.RunRequest) error {
+	if err := LoadConfig(); err != nil { // ensure config is loaded
+		return err
+	}
 	if req.Language == "" {
 		return fmt.Errorf("language is required")
 	}

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -10,10 +11,14 @@ import (
 type Language struct {
 	ID             string `yaml:"id"`
 	Name           string `yaml:"name"`
-	SourceFilename string `yaml:"source_filename"`
-	Artifact       string `yaml:"artifact,omitempty"` // Added for compiled languages like C++
+	SourceFilename string `yaml:"source_filename,omitempty"`
+	Artifact       string `yaml:"artifact,omitempty"`
 
-	Build *Step `yaml:"build,omitempty"` // Pointer used because build is optional (e.g., Python doesn't have it)
+	// Strategy fields for languages like Java
+	SourceFilenameStrategy   string `yaml:"source_filename_strategy,omitempty"`
+	ArtifactFilenameStrategy string `yaml:"artifact_filename_strategy,omitempty"`
+
+	Build *Step `yaml:"build,omitempty"`
 	Run   Step  `yaml:"run"`
 }
 
@@ -21,7 +26,7 @@ type Step struct {
 	Cmd           string   `yaml:"cmd"`
 	Args          []string `yaml:"args,omitempty"`
 	Limits        Limits   `yaml:"limits"`
-	FlagAllowlist []string `yaml:"flag_allowlist,omitempty"` // Added to support C++ flags restriction
+	FlagAllowlist []string `yaml:"flag_allowlist,omitempty"`
 }
 
 type Limits struct {
@@ -36,10 +41,8 @@ type Config struct {
 
 var Languages = make(map[string]Language)
 
-// LoadLanguages reads the YAML file and populates the global Languages map.
 func LoadLanguages(path string) error {
-	// Try the provided path first, then walk up a few parent dirs to support
-	// running tests from package subdirectories.
+	// Path fallback logic (keep your existing)
 	var data []byte
 	var err error
 	tryPath := path
@@ -56,17 +59,27 @@ func LoadLanguages(path string) error {
 	if err != nil {
 		return err
 	}
+
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return err
+		return fmt.Errorf("invalid languages.yaml: %w", err)
 	}
+
+	if len(cfg.Languages) == 0 {
+		return fmt.Errorf("no languages defined in yaml")
+	}
+
+	Languages = make(map[string]Language) // reset
 	for _, lang := range cfg.Languages {
+		if lang.ID == "" || lang.Run.Cmd == "" {
+			return fmt.Errorf("language %q missing required id or run.cmd", lang.Name)
+		}
 		Languages[lang.ID] = lang
 	}
+
 	return nil
 }
 
-// GetLanguage retrieves a language configuration by its ID string.
 func GetLanguage(id string) (Language, bool) {
 	lang, ok := Languages[id]
 	return lang, ok

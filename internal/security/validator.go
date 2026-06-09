@@ -1,11 +1,12 @@
 package security
 
 import (
+	"fmt"
+
 	"github.com/thesouldev/goboxd/internal/config"
 	"github.com/thesouldev/goboxd/internal/model"
 )
 
-// ValidateRunRequest performs full request validation
 func ValidateRunRequest(req model.RunRequest) error {
 	if err := config.ValidateRequest(req); err != nil {
 		return err
@@ -16,16 +17,22 @@ func ValidateRunRequest(req model.RunRequest) error {
 	if err := ValidateFilename(req.ArtifactFilename); err != nil {
 		return err
 	}
-	// Flag validation (Hole 3) - validates against language's flag_allowlist
-	if req.Build != nil && len(req.Build.Flags) > 0 {
+
+	if _, ok := config.GetLanguage(req.Language); !ok {
+		return fmt.Errorf("unknown language: %s", req.Language)
+	}
+
+	// Validate build and run flags using the language-specific rules.
+	if req.Build != nil {
 		if err := ValidateBuildFlags(req.Language, req.Build.Flags); err != nil {
 			return err
 		}
 	}
-	if req.Run != nil && len(req.Run.Flags) > 0 {
+	if req.Run != nil {
 		if err := ValidateRunFlags(req.Language, req.Run.Flags); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }

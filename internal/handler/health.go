@@ -14,18 +14,7 @@ import (
 	"github.com/thesouldev/goboxd/internal/sandbox"
 )
 
-// RecoveryMiddleware is a chi-compatible middleware
-func RecoveryMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if rec := recover(); rec != nil {
-				log.Printf("PANIC RECOVERED: %v", rec)
-				http.Error(w, `{"error":{"code":"internal_error","message":"Server error"}}`, http.StatusInternalServerError)
-			}
-		}()
-		next.ServeHTTP(w, r)
-	})
-}
+// ── Constants ────────────────────────────────────────────────────────────────
 
 const (
 	nsjailBinaryPath = "/usr/local/bin/nsjail"
@@ -33,56 +22,83 @@ const (
 )
 
 var (
-	buildVersion  = "0.1.0"
-	buildCommit   = "dev-stage1"
+	buildVersion  = "0.2.0-stage2"
+	buildCommit   = "dev"
 	buildDate     = "unknown"
 	nsjailVersion = "3.4"
 )
 
-func Healthz(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
-		http.Error(w, "encode error", http.StatusInternalServerError)
-	}
+// ── Middleware ────────────────────────────────────────────────────────────────
+
+// RecoveryMiddleware catches panics and returns a clean 500.
+func RecoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("PANIC RECOVERED: %v", rec)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]string{
+						"code":    "internal_error",
+						"message": "internal server error",
+					},
+				})
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
+// ── Healthz (/healthz) ────────────────────────────────────────────────────────
+// Lightweight liveness probe — just confirms the process is alive.
+
+func Healthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// ── Readyz (/readyz) ──────────────────────────────────────────────────────────
+// Deep readiness probe — checks nsjail binary, config, and every language.
+// Returns 200 if fully ready, 503 if any check fails.
+
 func Readyz(w http.ResponseWriter, r *http.Request) {
-	status := "ok"
-	languageStatuses, probeErr := getLanguageReadiness()
-	readinessErr := checkReadiness()
-	if readinessErr != nil || probeErr != nil {
-		status = "failed"
-		w.WriteHeader(http.StatusServiceUnavailable)
+	nsjailStatus := getNsjailStatus()
+	configStatus := getNsjailConfigStatus()
+	langStatuses, langErr := probeAllLanguages()
+
+	allReady := nsjailStatus["ok"] == true &&
+		configStatus["ok"] == true &&
+		langErr == nil
+
+	httpStatus := http.StatusOK
+	overallStatus := "ok"
+	if !allReady {
+		httpStatus = http.StatusServiceUnavailable
+		overallStatus = "degraded"
 	}
 
 	resp := map[string]interface{}{
-		"status":    status,
-		"nsjail":    getNsjailStatus(),
-		"config":    getNsjailConfigStatus(),
-		"languages": languageStatuses,
-	}
-
-	if readinessErr != nil {
-		restErr := map[string]string{"error": readinessErr.Error()}
-		resp["error"] = restErr
-	}
-	if probeErr != nil {
-		if existing, ok := resp["error"].(map[string]string); ok {
-			existing["languages"] = probeErr.Error()
-		} else {
-			resp["error"] = map[string]string{"languages": probeErr.Error()}
-		}
+		"status":    overallStatus,
+		"nsjail":    nsjailStatus,
+		"config":    configStatus,
+		"languages": langStatuses,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(httpStatus)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		log.Printf("Failed to encode response: %v", err)
+		log.Printf("readyz: encode error: %v", err)
 	}
 }
+
+// ── Info (/info) ──────────────────────────────────────────────────────────────
+// Returns build metadata, nsjail info, all language configs, global limits,
+// and live runtime stats.
 
 func Info(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]interface{}{
-		"build_info": map[string]string{
+		"build": map[string]string{
 			"version":    buildVersion,
 			"commit":     buildCommit,
 			"date":       buildDate,
@@ -92,10 +108,10 @@ func Info(w http.ResponseWriter, r *http.Request) {
 			"path":        nsjailBinaryPath,
 			"version":     nsjailVersion,
 			"config_path": nsjailConfigPath,
-			"status":      getNsjailStatus(),
+			"ok":          getNsjailStatus()["ok"],
 		},
 		"languages": buildLanguageInfo(),
-		"limits": map[string]int{
+		"limits": map[string]interface{}{
 			"max_source_bytes":    config.Global.MaxSourceBytes,
 			"max_tests":           config.Global.MaxTests,
 			"max_concurrent_jobs": config.Global.MaxConcurrentJobs,
@@ -108,99 +124,34 @@ func Info(w http.ResponseWriter, r *http.Request) {
 			"last_internal_error_at": metrics.LastInternalErrorAt(),
 		},
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		log.Printf("Failed to encode response: %v", err)
+		log.Printf("info: encode error: %v", err)
 	}
 }
 
-func buildLanguageInfo() []map[string]interface{} {
-	ids := make([]string, 0, len(config.Languages))
-	for id := range config.Languages {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
+// ── Internal helpers ──────────────────────────────────────────────────────────
 
-	languages := make([]map[string]interface{}, 0, len(ids))
-	for _, id := range ids {
-		lang := config.Languages[id]
-		buildLimits := map[string]interface{}{}
-		if lang.Build != nil {
-			buildLimits = map[string]interface{}{
-				"wall_time_s":   lang.Build.Limits.WallTimeS,
-				"memory_kb":     lang.Build.Limits.MemoryKB,
-				"max_processes": lang.Build.Limits.MaxProcesses,
-			}
-		}
-		languages = append(languages, map[string]interface{}{
-			"id":      lang.ID,
-			"name":    lang.Name,
-			"version": sandbox.LanguageVersion(lang),
-			"limits": map[string]interface{}{
-				"build": buildLimits,
-				"run": map[string]interface{}{
-					"wall_time_s":   lang.Run.Limits.WallTimeS,
-					"memory_kb":     lang.Run.Limits.MemoryKB,
-					"max_processes": lang.Run.Limits.MaxProcesses,
-				},
-			},
-		})
-	}
-	return languages
-}
-
-func getLanguageReadiness() ([]map[string]interface{}, error) {
-	ids := make([]string, 0, len(config.Languages))
-	for id := range config.Languages {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-
-	statuses := make([]map[string]interface{}, 0, len(ids))
-	var failed bool
-	for _, id := range ids {
-		lang := config.Languages[id]
-		status := map[string]interface{}{
-			"id":      lang.ID,
-			"name":    lang.Name,
-			"version": sandbox.LanguageVersion(lang),
-			"ready":   false,
-		}
-
-		err := sandbox.ProbeLanguage(lang)
-		if err != nil {
-			status["error"] = err.Error()
-			failed = true
-		} else {
-			status["ready"] = true
-		}
-		statuses = append(statuses, status)
-	}
-	if failed {
-		return statuses, fmt.Errorf("one or more languages failed smoke probe")
-	}
-	return statuses, nil
-}
-
+// getNsjailStatus checks the nsjail binary exists and is executable.
 func getNsjailStatus() map[string]interface{} {
 	status := map[string]interface{}{
-		"path":    nsjailBinaryPath,
-		"version": nsjailVersion,
-		"ok":      false,
+		"path": nsjailBinaryPath,
+		"ok":   false,
 	}
-
-	fileInfo, err := os.Stat(nsjailBinaryPath)
+	fi, err := os.Stat(nsjailBinaryPath)
 	if err != nil {
 		status["error"] = err.Error()
 		return status
 	}
-
-	status["ok"] = fileInfo.Mode().Perm()&0111 != 0
-	status["executable"] = status["ok"]
-	status["mode"] = fileInfo.Mode().String()
+	executable := fi.Mode().Perm()&0111 != 0
+	status["ok"] = executable
+	status["executable"] = executable
+	status["mode"] = fi.Mode().String()
 	return status
 }
 
+// getNsjailConfigStatus checks the nsjail config file exists.
 func getNsjailConfigStatus() map[string]interface{} {
 	status := map[string]interface{}{
 		"path": nsjailConfigPath,
@@ -214,19 +165,77 @@ func getNsjailConfigStatus() map[string]interface{} {
 	return status
 }
 
-func checkReadiness() error {
-	nsjailStatus := getNsjailStatus()
-	if nsjailStatus["ok"] != true {
-		if errValue, ok := nsjailStatus["error"]; ok {
-			return fmt.Errorf("nsjail not ready: %v", errValue)
+// probeAllLanguages runs a smoke test for every registered language.
+// Returns per-language status map and a top-level error if any language fails.
+func probeAllLanguages() ([]map[string]interface{}, error) {
+	ids := sortedLanguageIDs()
+	statuses := make([]map[string]interface{}, 0, len(ids))
+	anyFailed := false
+
+	for _, id := range ids {
+		lang := config.Languages[id]
+		entry := map[string]interface{}{
+			"id":      lang.ID,
+			"name":    lang.Name,
+			"version": sandbox.LanguageVersion(lang),
+			"ready":   false,
 		}
-		return fmt.Errorf("nsjail binary is not executable")
+		if err := sandbox.ProbeLanguage(lang); err != nil {
+			entry["error"] = err.Error()
+			anyFailed = true
+		} else {
+			entry["ready"] = true
+		}
+		statuses = append(statuses, entry)
 	}
 
-	configStatus := getNsjailConfigStatus()
-	if configStatus["ok"] != true {
-		return fmt.Errorf("nsjail config not ready: %v", configStatus["error"])
+	if anyFailed {
+		return statuses, fmt.Errorf("one or more languages failed readiness probe")
 	}
+	return statuses, nil
+}
 
-	return nil
+// buildLanguageInfo builds the language list for /info — includes limits and version.
+func buildLanguageInfo() []map[string]interface{} {
+	ids := sortedLanguageIDs()
+	result := make([]map[string]interface{}, 0, len(ids))
+
+	for _, id := range ids {
+		lang := config.Languages[id]
+
+		entry := map[string]interface{}{
+			"id":      lang.ID,
+			"name":    lang.Name,
+			"version": sandbox.LanguageVersion(lang),
+			"run_limits": map[string]interface{}{
+				"wall_time_s":   lang.Run.Limits.WallTimeS,
+				"memory_kb":     lang.Run.Limits.MemoryKB,
+				"max_processes": lang.Run.Limits.MaxProcesses,
+			},
+		}
+
+		if lang.Build != nil {
+			entry["build_limits"] = map[string]interface{}{
+				"wall_time_s":   lang.Build.Limits.WallTimeS,
+				"memory_kb":     lang.Build.Limits.MemoryKB,
+				"max_processes": lang.Build.Limits.MaxProcesses,
+			}
+			if len(lang.Build.FlagAllowlist) > 0 {
+				entry["build_flag_allowlist"] = lang.Build.FlagAllowlist
+			}
+		}
+
+		result = append(result, entry)
+	}
+	return result
+}
+
+// sortedLanguageIDs returns language IDs in alphabetical order for stable output.
+func sortedLanguageIDs() []string {
+	ids := make([]string, 0, len(config.Languages))
+	for id := range config.Languages {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }

@@ -28,3 +28,93 @@ languages:
         wall_time_s: 3
         memory_kb: 524288
         max_processes: 64
+
+  - id: c
+    name: C
+    source_filename: solution.c
+    artifact: solution
+    build:
+      cmd: /usr/bin/gcc
+      args: ["{{flags}}", "-o", "{{artifact}}", "{{source}}"]
+      limits:
+        wall_time_s: 5
+        memory_kb: 1048576
+        max_processes: 100
+      flag_allowlist: ["-O0","-O1","-O2","-O3","-Wall","-Wextra","-std=*"]
+    run:
+      cmd: "./{{artifact}}"
+      limits:
+        wall_time_s: 3
+        memory_kb: 524288
+        max_processes: 64
+
+  - id: java
+    name: Java
+    source_filename_strategy: from_request
+    artifact_filename_strategy: from_request
+    build:
+      cmd: /usr/bin/javac
+      args: ["{{flags}}", "{{source}}"]
+      limits:
+        wall_time_s: 6
+        memory_kb: 102400
+        max_processes: 100
+    run:
+      cmd: /usr/bin/java
+      args: ["{{artifact}}"]
+      limits:
+        wall_time_s: 6
+        memory_kb: 102400
+        max_processes: 100
+
+  - id: js
+    name: JavaScript (Node)
+    source_filename: solution.js
+    run:
+      cmd: /usr/bin/node
+      args: ["{{source}}"]
+      limits:
+        wall_time_s: 9
+        memory_kb: 102400
+        max_processes: 100
+
+  - id: bash
+    name: Bash
+    source_filename: solution.sh
+    run:
+      cmd: /usr/bin/bash
+      args: ["{{source}}"]
+      limits:
+        wall_time_s: 9
+        memory_kb: 102400
+        max_processes: 100
+
+  - id: verilog
+    name: Verilog
+    source_filename: solution.v
+    artifact: solution
+    build:
+      cmd: /usr/bin/iverilog
+      args: ["-o", "{{artifact}}", "{{source}}"]
+      limits:
+        wall_time_s: 10
+        memory_kb: 524288
+        max_processes: 50
+    run:
+      cmd: /usr/bin/vvp
+      args: ["{{artifact}}"]
+      limits:
+        wall_time_s: 5
+        memory_kb: 262144
+        max_processes: 50
+
+  - id: lua
+    name: Lua
+    source_filename: solution.lua
+    run:
+      cmd: /usr/bin/lua
+      args: ["{{source}}"]
+      limits:
+        wall_time_s: 9
+        memory_kb: 102400
+        max_processes: 100
