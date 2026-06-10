@@ -13,9 +13,13 @@ Fixed in:
 Fixed in:
 - `internal/sandbox/executor.go:170-176` — using `exec.CommandContext` with argument arrays (no shell)
 
+**3. Compiler-flag injection**  
+**Status**: Closed  
+**Files**: `internal/security/flags.go`, `internal/security/validator.go`
+
 **4. No request size limits**  
 Fixed in:
-- `internal/handler/run.go:25` — `http.MaxBytesReader`
+- `internal/api/handlers/run.go:25` — `http.MaxBytesReader`
 - `internal/config/config.go:58-82` — `ValidateRequest()` with source, stdin, and expected output limits
 
 **5. UID collisions under load**  

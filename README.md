@@ -15,59 +15,105 @@
 
 ## Overview
 
-goboxd is an HTTP service written in Go that compiles and runs untrusted code inside isolated sandboxes and returns the result. Optional test cases can be supplied to assert behaviour against expected output. It is built for safe execution of code across many languages, with strict isolation, bounded concurrency, and a plug and play language registry.
+goboxd is a Go HTTP service that loads language definitions from [languages.yaml](languages.yaml), validates incoming requests, executes untrusted code inside an nsjail sandbox, and returns structured execution results. The API supports optional test cases, per-language build/run limits, and health/readiness probes for orchestration.
 
-## Framework
+## What the service actually does
 
-We chose [chi](https://github.com/go-chi/chi) as the router because it is lightweight, has excellent middleware support, and adds almost no overhead compared to net/http.
+- Loads the language registry from [config/languages.yaml](config/languages.yaml) at startup.
+- Exposes HTTP endpoints for liveness, readiness, system info, and code execution.
+- Uses the Go chi router with request logging, panic recovery, and graceful shutdown.
+- Runs each request in a temporary jail directory with nsjail, with per-language time, memory, and process limits.
+- Enforces request-size limits and rejects invalid or unsafe requests before sandbox execution.
 
-## Features
+## Supported languages
 
-- Plug and play language registry driven by YAML
-- Process isolation using Linux namespaces and cgroups
-- Bounded concurrency with request queuing
-- Fully containerised for local development and deployment
-- Per request resource limits for time, memory, and processes
-- Liveness and readiness probes for orchestration
+The language registry currently defines these IDs:
 
-## Getting started
+- py3 — Python 3
+- cpp — C++
+- c — C
+- java — Java
+- js — JavaScript (Node)
+- bash — Bash
+- verilog — Verilog
+- lua — Lua
+
+## Quick start
 
 ### Prerequisites
 
 - Docker with Compose v2
+- A local Docker daemon
 
-No Go toolchain or system dependencies are required on the host. Everything runs in containers.
+No host Go toolchain is required to run the service itself, but the project still includes Go-based tests and linting through the Docker tool container.
 
-### Installation
+### Build and run
 
 ```sh
 git clone https://github.com/thesouldev/goboxd.git
 cd goboxd
 make build
+make run
 ```
 
-### Usage
+The service listens on port 8080 by default.
+
+### Basic health check
 
 ```sh
-make run          # start the service on :8080
-make test         # run unit tests
-make integration  # run end to end tests
-make lint         # run static analysis
+curl http://localhost:8080/healthz
+curl http://localhost:8080/health
+curl http://localhost:8080/readyz
+curl http://localhost:8080/ready
+curl http://localhost:8080/info
+```
+
+### Execute code
+
+```sh
+curl -X POST http://localhost:8080/run \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "language": "py3",
+    "source": "print(\"hello\")",
+    "tests": [{ "stdin": "", "expected_stdout": "hello" }]
+  }'
+```
+
+## Runtime behavior
+
+- POST /run validates the request body, rejects unknown fields, and applies global limits such as a 2 MiB request body cap and a maximum of 50 test cases.
+- The sandbox pipeline writes the source file, optionally runs a build phase, executes the run phase with nsjail, and summarizes the result.
+- The response includes a top-level status plus per-test details and build metadata.
+- The readiness endpoint performs real probes for the nsjail binary, its config file, and each registered language.
+
+## Development commands
+
+```sh
+make test         # unit tests in the Docker tools container
+make integration  # end-to-end execution tests for all supported languages
+make lint         # golangci-lint
+make logs         # follow service logs
+make stop         # stop the stack
 ```
 
 ## Project structure
 
-```
+```text
 .
-├── cmd/goboxd/   binary entry point
-├── internal/     private application packages
-├── docs/         api, languages, security, benchmarks, architecture
-└── tests/        integration tests
+├── cmd/goboxd/        # main HTTP server entry point
+├── internal/          # handlers, sandboxing, config, security, metrics, models
+├── config/
+│   ├── languages.yaml # language registry and limits
+│   └── nsjail.cfg     # nsjail sandbox configuration
+├── deployments/docker/ # runtime and tools images
+├── docs/              # API, architecture, benchmarks, and security notes
+└── tests/             # unit and integration coverage
 ```
 
 ## Contributing
 
-Contributions are welcome. Open an issue to discuss substantial changes before sending a pull request.
+Contributions are welcome. Please open an issue or discuss substantial changes before submitting a pull request.
 
 ## License
 

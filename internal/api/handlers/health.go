@@ -1,4 +1,4 @@
-package handler
+package handlers
 
 import (
 	"encoding/json"
@@ -14,8 +14,6 @@ import (
 	"github.com/thesouldev/goboxd/internal/sandbox"
 )
 
-// ── Constants ────────────────────────────────────────────────────────────────
-
 const (
 	nsjailBinaryPath = "/usr/local/bin/nsjail"
 	nsjailConfigPath = "/app/config/nsjail.cfg"
@@ -28,9 +26,6 @@ var (
 	nsjailVersion = "3.4"
 )
 
-// ── Middleware ────────────────────────────────────────────────────────────────
-
-// RecoveryMiddleware catches panics and returns a clean 500.
 func RecoveryMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -50,17 +45,10 @@ func RecoveryMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// ── Healthz (/healthz) ────────────────────────────────────────────────────────
-// Lightweight liveness probe — just confirms the process is alive.
-
 func Healthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
-
-// ── Readyz (/readyz) ──────────────────────────────────────────────────────────
-// Deep readiness probe — checks nsjail binary, config, and every language.
-// Returns 200 if fully ready, 503 if any check fails.
 
 func Readyz(w http.ResponseWriter, r *http.Request) {
 	nsjailStatus := getNsjailStatus()
@@ -91,10 +79,6 @@ func Readyz(w http.ResponseWriter, r *http.Request) {
 		log.Printf("readyz: encode error: %v", err)
 	}
 }
-
-// ── Info (/info) ──────────────────────────────────────────────────────────────
-// Returns build metadata, nsjail info, all language configs, global limits,
-// and live runtime stats.
 
 func Info(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]interface{}{
@@ -131,9 +115,6 @@ func Info(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
-// getNsjailStatus checks the nsjail binary exists and is executable.
 func getNsjailStatus() map[string]interface{} {
 	status := map[string]interface{}{
 		"path": nsjailBinaryPath,
@@ -151,7 +132,6 @@ func getNsjailStatus() map[string]interface{} {
 	return status
 }
 
-// getNsjailConfigStatus checks the nsjail config file exists.
 func getNsjailConfigStatus() map[string]interface{} {
 	status := map[string]interface{}{
 		"path": nsjailConfigPath,
@@ -165,8 +145,6 @@ func getNsjailConfigStatus() map[string]interface{} {
 	return status
 }
 
-// probeAllLanguages runs a smoke test for every registered language.
-// Returns per-language status map and a top-level error if any language fails.
 func probeAllLanguages() ([]map[string]interface{}, error) {
 	ids := sortedLanguageIDs()
 	statuses := make([]map[string]interface{}, 0, len(ids))
@@ -195,7 +173,6 @@ func probeAllLanguages() ([]map[string]interface{}, error) {
 	return statuses, nil
 }
 
-// buildLanguageInfo builds the language list for /info — includes limits and version.
 func buildLanguageInfo() []map[string]interface{} {
 	ids := sortedLanguageIDs()
 	result := make([]map[string]interface{}, 0, len(ids))
@@ -230,7 +207,6 @@ func buildLanguageInfo() []map[string]interface{} {
 	return result
 }
 
-// sortedLanguageIDs returns language IDs in alphabetical order for stable output.
 func sortedLanguageIDs() []string {
 	ids := make([]string, 0, len(config.Languages))
 	for id := range config.Languages {

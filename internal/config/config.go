@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/thesouldev/goboxd/internal/model"
@@ -21,24 +22,35 @@ type GlobalConfig struct {
 	MaxOutputBytes         int           `yaml:"max_output_bytes"`
 }
 
-var Global = GlobalConfig{
-	MaxSourceBytes:         256 * 1024, // 256 KiB
-	MaxTests:               50,
-	MaxTestStdinBytes:      16 * 1024,       // 16 KiB per stdin
-	MaxExpectedStdoutBytes: 64 * 1024,       // 64 KiB per expected stdout
-	MaxRequestBytes:        2 * 1024 * 1024, // 2 MiB total request body
-	MaxConcurrentJobs: func() int {
-		n := runtime.NumCPU()
-		if n < 1 {
-			return 1
-		}
-		return n
-	}(),
-	RequestTimeout: 30 * time.Second,
-	MaxOutputBytes: 1024 * 1024, // 1 MiB cap per output stream
+var (
+	Global GlobalConfig
+	once   sync.Once
+)
+
+func init() {
+	Global = GlobalConfig{
+		MaxSourceBytes:         256 * 1024, // 256 KiB
+		MaxTests:               50,
+		MaxTestStdinBytes:      16 * 1024,
+		MaxExpectedStdoutBytes: 64 * 1024,
+		MaxRequestBytes:        2 * 1024 * 1024, // 2 MiB
+		MaxConcurrentJobs: func() int {
+			n := runtime.NumCPU()
+			if n < 1 {
+				return 1
+			}
+			return n
+		}(),
+		RequestTimeout: 30 * time.Second,
+		MaxOutputBytes: 1024 * 1024, // 1 MiB
+	}
 }
 
 func LoadConfig() error {
+	once.Do(func() {
+		// Future: load from YAML/config file here if needed
+	})
+
 	if env := os.Getenv("MAX_CONCURRENT_JOBS"); env != "" {
 		value, err := strconv.Atoi(env)
 		if err != nil {
@@ -49,16 +61,21 @@ func LoadConfig() error {
 		}
 		Global.MaxConcurrentJobs = value
 	}
+
 	if Global.MaxConcurrentJobs < 1 {
 		Global.MaxConcurrentJobs = 1
 	}
+
 	return nil
 }
 
+// GetConfig returns a copy to avoid any mutation risks
+func GetConfig() GlobalConfig {
+	once.Do(func() { _ = LoadConfig() }) // ensure loaded
+	return Global
+}
+
 func ValidateRequest(req model.RunRequest) error {
-	if err := LoadConfig(); err != nil { // ensure config is loaded
-		return err
-	}
 	if req.Language == "" {
 		return fmt.Errorf("language is required")
 	}
@@ -74,6 +91,7 @@ func ValidateRequest(req model.RunRequest) error {
 	if len(req.Tests) == 0 || len(req.Tests) > Global.MaxTests {
 		return fmt.Errorf("invalid number of tests: must be 1-%d", Global.MaxTests)
 	}
+
 	for idx, test := range req.Tests {
 		if len(test.Stdin) > Global.MaxTestStdinBytes {
 			return fmt.Errorf("test[%d].stdin too large: max %d bytes", idx, Global.MaxTestStdinBytes)

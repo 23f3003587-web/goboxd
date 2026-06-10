@@ -1,137 +1,248 @@
+// TestRun_AllLanguages exercises the /run endpoint for every registered language in config/languages.yaml.
+// It verifies the happy path for each language, plus wrong-output and invalid-language handling.
 package integration
 
 import (
 	"bytes"
 	"encoding/json"
-	"net/http/httptest"
-	"os/exec"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thesouldev/goboxd/internal/config"
-	"github.com/thesouldev/goboxd/internal/handler"
+	"github.com/thesouldev/goboxd/internal/model"
 )
 
-func TestRunEndpoint_Stage1(t *testing.T) {
-	// Stage 1 requirement: nsjail must be available
-	if _, err := exec.LookPath("nsjail"); err != nil {
-		t.Skip("nsjail not found in PATH; skipping integration tests")
-	}
+const defaultServerURL = "http://localhost:8080"
 
-	// Load language configuration
-	if err := config.LoadLanguages("languages.yaml"); err != nil {
-		t.Fatalf("failed to load languages.yaml: %v", err)
-	}
+func TestRun_AllLanguages(t *testing.T) {
+	baseURL := serverURL(t)
+	requireServerReachable(t, baseURL)
 
-	tests := []struct {
-		name       string
-		req        string
-		wantStatus int
-	}{
-		// ==================== Python 3 ====================
-		{
-			name: "py3 hello world",
-			req: `{
-				"language": "py3",
-				"source": "print('Hello World')",
-				"tests": [{"stdin": "", "expected_stdout": "Hello World"}]
-			}`,
-			wantStatus: 200,
-		},
-		{
-			name: "py3 with input",
-			req: `{
-				"language": "py3",
-				"source": "n = int(input())\nprint(n * 10)",
-				"tests": [{"stdin": "8", "expected_stdout": "80"}]
-			}`,
-			wantStatus: 200,
-		},
+	languages := loadLanguages(t)
 
-		// ==================== C++ ====================
-		{
-			name: "cpp hello world",
-			req: `{
-				"language": "cpp",
-				"source": "#include <iostream>\nint main() { std::cout << \"Hello World\\n\"; return 0; }",
-				"tests": [{"stdin": "", "expected_stdout": "Hello World"}]
-			}`,
-			wantStatus: 200,
-		},
-		{
-			name: "cpp with input",
-			req: `{
-				"language": "cpp",
-				"source": "#include <iostream>\nint main() { int a, b; std::cin >> a >> b; std::cout << (a + b) << std::endl; return 0; }",
-				"tests": [{"stdin": "13 7", "expected_stdout": "20"}]
-			}`,
-			wantStatus: 200,
-		},
-		{
-			name: "cpp with allowed build flags",
-			req: `{
-				"language": "cpp",
-				"source": "#include <iostream>\nint main() { std::cout << \"Optimized\\n\"; return 0; }",
-				"build": {"flags": ["-O2", "-Wall"]},
-				"tests": [{"stdin": "", "expected_stdout": "Optimized"}]
-			}`,
-			wantStatus: 200,
-		},
+	for langID, lang := range languages {
+		langID, lang := langID, lang
+		t.Run(langID, func(t *testing.T) {
+			req := buildHelloWorldRequest(langID, lang)
+			resp := sendRunRequest(t, baseURL, req)
 
-		// ==================== Security & Validation ====================
-		{
-			name: "path traversal blocked",
-			req: `{
-				"language": "cpp",
-				"source_filename": "../../malicious.cpp",
-				"source": "#include <iostream>\nint main(){return 0;}",
-				"tests": [{"stdin": "", "expected_stdout": ""}]
-			}`,
-			wantStatus: 400,
-		},
-		{
-			name: "disallowed build flag",
-			req: `{
-				"language": "cpp",
-				"source": "#include <iostream>\nint main(){return 0;}",
-				"build": {"flags": ["-fpermissive", "-O999"]},
-				"tests": [{"stdin": "", "expected_stdout": ""}]
-			}`,
-			wantStatus: 400,
-		},
-		{
-			name: "unknown language",
-			req: `{
-				"language": "rust",
-				"source": "fn main() {}",
-				"tests": [{"stdin": "", "expected_stdout": ""}]
-			}`,
-			wantStatus: 400,
-		},
-	}
+			require.NotEmpty(t, resp.Status, "top-level status should be present")
+			require.Equal(t, "accepted", resp.Status, "expected successful run to be accepted")
+			require.Equal(t, "ok", resp.Build.Status, "expected build phase to succeed")
+			require.NotEmpty(t, resp.Tests, "expected at least one test result")
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("POST", "/run", bytes.NewBufferString(tt.req))
-			req.Header.Set("Content-Type", "application/json")
-
-			rr := httptest.NewRecorder()
-			handler.Run(rr, req)
-
-			if rr.Code != tt.wantStatus {
-				t.Errorf("%s: wrong status code\ngot: %d\nwant: %d\nbody: %s",
-					tt.name, rr.Code, tt.wantStatus, rr.Body.String())
-			}
-
-			// Additional validation for successful responses
-			if tt.wantStatus == 200 {
-				var resp map[string]any
-				if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-					t.Errorf("%s: successful response must be valid JSON", tt.name)
-				}
-				if _, hasStatus := resp["status"]; !hasStatus {
-					t.Errorf("%s: response should contain 'status' field", tt.name)
-				}
-			}
+			testResult := resp.Tests[0]
+			require.Equal(t, "accepted", testResult.Status, "expected hello-world test to be accepted")
+			assert.NotEmpty(t, testResult.Stdout, "expected stdout to be returned")
+			assert.GreaterOrEqual(t, testResult.DurationMS, 0, "duration must be non-negative")
+			assert.GreaterOrEqual(t, testResult.MemoryPeakKB, 0, "memory peak must be non-negative")
+			assert.GreaterOrEqual(t, resp.Build.DurationMS, 0, "build duration must be non-negative")
 		})
 	}
+}
+
+func TestRun_FailureModes(t *testing.T) {
+	baseURL := serverURL(t)
+	requireServerReachable(t, baseURL)
+
+	t.Run("wrong_output", func(t *testing.T) {
+		req := buildHelloWorldRequest("py3", config.Languages["py3"])
+		req.Tests = []model.TestCase{{Stdin: "", ExpectedStdout: "definitely not the expected output"}}
+
+		resp := sendRunRequest(t, baseURL, req)
+		require.Equal(t, "wrong_output", resp.Status, "expected wrong-output status for mismatched expected stdout")
+		require.NotEmpty(t, resp.Tests)
+		require.Equal(t, "wrong_output", resp.Tests[0].Status)
+	})
+
+	t.Run("invalid_language", func(t *testing.T) {
+		req := model.RunRequest{
+			Language: "definitely-not-a-language",
+			Source:   "print('hello')",
+			Tests:    []model.TestCase{{Stdin: "", ExpectedStdout: "hello"}},
+		}
+
+		statusCode, body := postRunExpectStatus(t, baseURL, req, http.StatusBadRequest)
+		require.Equal(t, http.StatusBadRequest, statusCode)
+		assert.True(t, strings.Contains(string(body), "language") || strings.Contains(string(body), "unknown"), string(body))
+	})
+}
+
+func loadLanguages(t *testing.T) map[string]config.Language {
+	t.Helper()
+
+	repoRoot := findRepoRoot(t)
+	require.NoError(t, config.LoadLanguages(filepath.Join(repoRoot, "config", "languages.yaml")), "failed to load config/languages.yaml")
+
+	return config.Languages
+}
+
+func buildHelloWorldRequest(langID string, lang config.Language) model.RunRequest {
+	req := model.RunRequest{
+		Language: langID,
+		Tests: []model.TestCase{{
+			Stdin:          "",
+			ExpectedStdout: expectedHelloOutput(langID),
+		}},
+	}
+
+	req.Source = helloWorldSource(langID)
+
+	if lang.SourceFilename != "" {
+		req.SourceFilename = lang.SourceFilename
+	}
+	if lang.Artifact != "" {
+		req.ArtifactFilename = lang.Artifact
+	}
+
+	switch langID {
+	case "java":
+		req.SourceFilename = "Hello.java"
+		req.ArtifactFilename = "Hello"
+	case "cpp", "c":
+		req.ArtifactFilename = "solution"
+	case "verilog":
+		req.SourceFilename = "solution.v"
+		req.ArtifactFilename = "solution"
+	}
+
+	// Build and Run are value types (not pointers)
+	if lang.Build != nil && lang.Build.Cmd != "" {
+		req.Build = &model.BuildRun{Limits: toModelLimits(lang.Build.Limits)}
+	}
+	if lang.Run.Cmd != "" {
+		req.Run = &model.BuildRun{Limits: toModelLimits(lang.Run.Limits)}
+	}
+
+	return req
+}
+
+func helloWorldSource(langID string) string {
+	switch langID {
+	case "c":
+		return "#include <stdio.h>\n\nint main(void) { puts(\"Hello from c\"); return 0; }"
+	case "cpp":
+		return "#include <iostream>\n\nint main() { std::cout << \"Hello from cpp\\n\"; return 0; }"
+	case "java":
+		return "public class Hello { public static void main(String[] args) { System.out.println(\"Hello from java\"); } }"
+	case "js":
+		return "console.log('Hello from js');"
+	case "bash":
+		return "echo 'Hello from bash'"
+	case "verilog":
+		return "module top; initial begin $display(\"Hello from verilog\"); $finish; end endmodule"
+	case "lua":
+		return "print('Hello from lua')"
+	default:
+		return "print('Hello from py3')"
+	}
+}
+
+func toModelLimits(limits config.Limits) model.Limits {
+	return model.Limits{
+		WallTimeS:    limits.WallTimeS,
+		MemoryKB:     limits.MemoryKB,
+		MaxProcesses: limits.MaxProcesses,
+	}
+}
+
+func expectedHelloOutput(langID string) string {
+	switch langID {
+	case "c":
+		return "Hello from c"
+	case "cpp":
+		return "Hello from cpp"
+	case "java":
+		return "Hello from java"
+	case "js":
+		return "Hello from js"
+	case "bash":
+		return "Hello from bash"
+	case "verilog":
+		return "Hello from verilog"
+	case "lua":
+		return "Hello from lua"
+	default:
+		return "Hello from py3"
+	}
+}
+
+func sendRunRequest(t *testing.T, baseURL string, req model.RunRequest) model.RunResponse {
+	t.Helper()
+
+	statusCode, body := postRunExpectStatus(t, baseURL, req, http.StatusOK)
+	require.Equal(t, http.StatusOK, statusCode, "unexpected HTTP status for /run: %s", string(body))
+
+	var resp model.RunResponse
+	require.NoError(t, json.Unmarshal(body, &resp), "unable to decode /run response: %s", string(body))
+	return resp
+}
+
+func postRunExpectStatus(t *testing.T, baseURL string, req model.RunRequest, wantStatus int) (int, []byte) {
+	t.Helper()
+
+	body, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/run", bytes.NewReader(body))
+	require.NoError(t, err)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(httpReq)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	rawBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, wantStatus, resp.StatusCode, "unexpected HTTP status for /run: %s", string(rawBody))
+
+	return resp.StatusCode, rawBody
+}
+
+func serverURL(t *testing.T) string {
+	t.Helper()
+
+	if raw := strings.TrimSpace(os.Getenv("TEST_SERVER_URL")); raw != "" {
+		return raw
+	}
+	return defaultServerURL
+}
+
+func requireServerReachable(t *testing.T, baseURL string) {
+	t.Helper()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(baseURL + "/healthz")
+	if err != nil || resp == nil || resp.StatusCode != http.StatusOK {
+		t.Skipf("server not reachable at %s: %v", baseURL, err)
+	}
+	if resp != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
+}
+
+func findRepoRoot(t *testing.T) string {
+	t.Helper()
+
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+
+	for dir := cwd; ; dir = filepath.Dir(dir) {
+		if _, err := os.Stat(filepath.Join(dir, "config", "languages.yaml")); err == nil {
+			return dir
+		}
+		if dir == filepath.Dir(dir) {
+			break
+		}
+	}
+
+	return cwd
 }

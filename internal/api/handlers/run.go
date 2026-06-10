@@ -1,4 +1,4 @@
-package handler
+package handlers
 
 import (
 	"encoding/json"
@@ -13,7 +13,6 @@ import (
 )
 
 func Run(w http.ResponseWriter, r *http.Request) {
-	// 1. Enforce strict POST method routing
 	if r.Method != http.MethodPost {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -21,11 +20,9 @@ func Run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Decode incoming JSON safely and enforce a total request size cap at the HTTP layer.
 	r.Body = http.MaxBytesReader(w, r.Body, int64(config.Global.MaxRequestBytes))
 	var req model.RunRequest
 	dec := json.NewDecoder(r.Body)
-	// reject unknown fields to avoid silently ignoring attacker-supplied keys
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -34,7 +31,6 @@ func Run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Run validation without consuming concurrency.
 	if err := security.ValidateRunRequest(req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -48,7 +44,6 @@ func Run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Enforce the global concurrency limit and queue when full.
 	if err := AcquireJob(r.Context()); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -64,8 +59,6 @@ func Run(w http.ResponseWriter, r *http.Request) {
 	defer ReleaseJob()
 
 	metrics.IncRequests()
-	// Defensive re-check before executing the job to ensure validation
-	// wasn't bypassed earlier (extra safety for running instances).
 	if err := security.ValidateRunRequest(req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)

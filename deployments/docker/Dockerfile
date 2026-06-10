@@ -54,11 +54,16 @@ RUN CGO_ENABLED=0 GOOS=linux \
 # =========================================================
 FROM debian:${DEBIAN_VERSION}-slim AS runtime
 
+LABEL org.opencontainers.image.title="goboxd" \
+      org.opencontainers.image.description="Sandboxed code execution service" \
+      org.opencontainers.image.source="https://github.com/thesouldev/goboxd"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libnl-route-3-200 \
     libprotobuf32 \
     python3 \
+    wget \
     g++ \
     gcc \
     default-jdk \
@@ -71,8 +76,20 @@ COPY --from=nsjail-builder /usr/local/bin/nsjail /usr/local/bin/nsjail
 COPY --from=builder /out/goboxd /usr/local/bin/goboxd
 
 WORKDIR /app
-COPY languages.yaml .
 COPY config/ /app/config/
 
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD wget -q --spider http://127.0.0.1:8080/healthz || exit 1
 ENTRYPOINT ["/usr/local/bin/goboxd"]
+
+# =============================================
+# Tools stage — for linting, testing, development
+# =============================================
+FROM builder AS tools
+
+RUN go install github.com/rakyll/hey@v0.1.4
+RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.5 && \
+    ln -s $(go env GOPATH)/bin/golangci-lint /usr/local/bin/golangci-lint
+
+WORKDIR /src

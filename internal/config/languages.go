@@ -70,10 +70,39 @@ func LoadLanguages(path string) error {
 	}
 
 	Languages = make(map[string]Language) // reset
+
+	seen := make(map[string]bool)
+
 	for _, lang := range cfg.Languages {
-		if lang.ID == "" || lang.Run.Cmd == "" {
-			return fmt.Errorf("language %q missing required id or run.cmd", lang.Name)
+		if lang.ID == "" {
+			return fmt.Errorf("language missing required id")
 		}
+		if lang.Run.Cmd == "" {
+			return fmt.Errorf("language %q missing required run.cmd", lang.ID)
+		}
+
+		// Validate Build step if present
+		if lang.Build != nil && lang.Build.Cmd == "" {
+			return fmt.Errorf("language %q has build section but missing build.cmd", lang.ID)
+		}
+
+		// Validate limits
+		if lang.Run.Limits.WallTimeS <= 0 {
+			return fmt.Errorf("language %q: wall_time_s must be > 0", lang.ID)
+		}
+		if lang.Run.Limits.MemoryKB <= 0 {
+			return fmt.Errorf("language %q: memory_kb must be > 0", lang.ID)
+		}
+		if lang.Run.Limits.MaxProcesses <= 0 {
+			return fmt.Errorf("language %q: max_processes must be > 0", lang.ID)
+		}
+
+		// Prevent duplicate IDs
+		if seen[lang.ID] {
+			return fmt.Errorf("duplicate language id: %q", lang.ID)
+		}
+		seen[lang.ID] = true
+
 		Languages[lang.ID] = lang
 	}
 

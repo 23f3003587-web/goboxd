@@ -82,6 +82,11 @@ func matchesPattern(flag, pattern string) bool {
 		return true
 	}
 
+	// Reject flags containing shell metacharacters
+	if strings.ContainsAny(flag, " \t\n;|&$`(){}[]<>\"'\\") {
+		return false
+	}
+
 	// Wildcard pattern matching (e.g., "-std=*" matches "-std=c++17")
 	if strings.Contains(pattern, "*") {
 		// Replace * with a regex-like match

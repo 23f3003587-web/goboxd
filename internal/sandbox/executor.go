@@ -25,6 +25,27 @@ type ExecutionResult struct {
 	MemoryPeakKB int
 }
 
+// CompareOutput is the single source of truth for comparing actual vs expected stdout.
+// Used by both Execute() and tests.
+func CompareOutput(actual, expected string) string {
+	rawActual := strings.TrimSpace(actual)
+	rawExpected := strings.TrimSpace(expected)
+
+	if rawActual == rawExpected {
+		return "accepted"
+	}
+
+	normalize := func(s string) string {
+		return strings.Join(strings.Fields(s), " ")
+	}
+
+	if normalize(rawActual) == normalize(rawExpected) {
+		return "output_whitespace_mismatch"
+	}
+
+	return "wrong_output"
+}
+
 // Execute handles the end-to-end sandbox pipeline: writing the file,
 // optional compilation, running all test cases, and aggregating statuses.
 func Execute(req model.RunRequest) (*model.RunResponse, error) {
@@ -57,7 +78,7 @@ func Execute(req model.RunRequest) (*model.RunResponse, error) {
 		Build: model.BuildResult{Status: "ok"},
 	}
 
-	if lang.Build != nil {
+	if lang.Build != nil && lang.Build.Cmd != "" {
 		buildRes, err := runStep(jail, lang.Build, req.Build, srcFilename, artifact, "")
 		resp.Build = model.BuildResult{
 			Status:     buildRes.Status,
@@ -103,36 +124,25 @@ func Execute(req model.RunRequest) (*model.RunResponse, error) {
 			continue
 		}
 
-		rawExpected := strings.TrimSpace(test.ExpectedStdout)
-		rawActual := strings.TrimSpace(runRes.Stdout)
-		normalize := func(s string) string {
-			return strings.Join(strings.Fields(s), " ")
-		}
-
-		if rawExpected == rawActual {
-			result.Status = "accepted"
-		} else if normalize(rawActual) == normalize(rawExpected) {
-			result.Status = "output_whitespace_mismatch"
-		} else {
-			result.Status = "wrong_output"
-		}
+		// Use shared comparison logic (no duplication)
+		result.Status = CompareOutput(runRes.Stdout, test.ExpectedStdout)
 
 		testResults = append(testResults, result)
 	}
 
 	resp.Tests = testResults
-	resp.Status = determineTopLevelStatus(resp.Build, resp.Tests)
+	resp.Status = DetermineTopLevelStatus(resp.Build, resp.Tests)
 	return resp, nil
 }
 
 // runStep maps configurations and wraps an execution command within an nsjail process isolation layer.
 func runStep(jail *Jail, step *config.Step, override *model.BuildRun, srcFilename, artifact, stdin string) (*ExecutionResult, error) {
-	processedCmd := processTemplate(step.Cmd, srcFilename, artifact)
+	processedCmd := ProcessTemplate(step.Cmd, srcFilename, artifact)
 
 	flags := getFlags(override)
 	procArgs := make([]string, 0, len(step.Args))
 	for _, arg := range step.Args {
-		arg = processTemplate(arg, srcFilename, artifact)
+		arg = ProcessTemplate(arg, srcFilename, artifact)
 		if strings.Contains(arg, "{{flags}}") {
 			procArgs = append(procArgs, flags...)
 		} else {
@@ -203,7 +213,7 @@ func runStep(jail *Jail, step *config.Step, override *model.BuildRun, srcFilenam
 	return result, nil
 }
 
-func processTemplate(value, source, artifact string) string {
+func ProcessTemplate(value, source, artifact string) string {
 	value = strings.ReplaceAll(value, "{{source}}", source)
 	value = strings.ReplaceAll(value, "{{artifact}}", artifact)
 	return value
@@ -269,13 +279,13 @@ func getFlags(override *model.BuildRun) []string {
 
 func createNotExecutedTests(tests []model.TestCase) []model.TestResult {
 	results := make([]model.TestResult, len(tests))
-	for i := range tests {
+	for i := range results {
 		results[i] = model.TestResult{Status: "not_executed"}
 	}
 	return results
 }
 
-func determineTopLevelStatus(build model.BuildResult, tests []model.TestResult) string {
+func DetermineTopLevelStatus(build model.BuildResult, tests []model.TestResult) string {
 	if build.Status != "ok" {
 		return "build_failed"
 	}
@@ -294,18 +304,8 @@ func sanitizeNSJailStderr(s string) string {
 	return strings.TrimSpace(re.ReplaceAllString(s, ""))
 }
 
-// truncateOutput caps output at maxBytes (kept for potential direct use).
-func truncateOutput(output string, maxBytes int) string {
-	if len(output) > maxBytes {
-		return output[:maxBytes] + fmt.Sprintf("\n\n[OUTPUT TRUNCATED - exceeded %d bytes limit]", maxBytes)
-	}
-	return output
-}
-
 // ── Version detection ─────────────────────────────────────────────────────────
 
-// versionFlags maps binary names to the flag they use to print their version.
-// Most tools use --version; exceptions are listed here.
 var versionFlags = map[string]string{
 	"iverilog": "-V",
 	"vvp":      "-v",
@@ -318,7 +318,7 @@ var versionFlags = map[string]string{
 // LanguageVersion returns the first line of the compiler/interpreter version string.
 func LanguageVersion(lang config.Language) string {
 	cmdPath := lang.Run.Cmd
-	if lang.Build != nil {
+	if lang.Build != nil && lang.Build.Cmd != "" {
 		cmdPath = lang.Build.Cmd
 	}
 
@@ -336,8 +336,6 @@ func LanguageVersion(lang config.Language) string {
 	output, err := exec.Command(program, flag).CombinedOutput()
 	out := strings.TrimSpace(string(output))
 	if err != nil {
-		// Some tools (e.g. java -version) write to stderr and exit 0 or 1 —
-		// return whatever they printed rather than "unknown".
 		if out != "" {
 			return strings.SplitN(out, "\n", 2)[0]
 		}
@@ -348,7 +346,6 @@ func LanguageVersion(lang config.Language) string {
 
 // ── Language probing ──────────────────────────────────────────────────────────
 
-// probeSnippets maps file extensions to minimal valid source that just prints "ok".
 var probeSnippets = map[string]string{
 	".py":   "print('ok')\n",
 	".js":   "console.log('ok');\n",
@@ -361,15 +358,12 @@ var probeSnippets = map[string]string{
 	".lua":  "print('ok')\n",
 }
 
-// probeFilename returns a safe concrete filename for languages that use
-// source_filename_strategy: from_request (e.g. Java).
 func probeFilename(lang config.Language) string {
 	if lang.SourceFilename != "" {
 		return lang.SourceFilename
 	}
-	// Derive a safe default from the run/build command name.
 	cmdPath := lang.Run.Cmd
-	if lang.Build != nil {
+	if lang.Build != nil && lang.Build.Cmd != "" {
 		cmdPath = lang.Build.Cmd
 	}
 	switch filepath.Base(cmdPath) {
@@ -386,17 +380,14 @@ func probeFilename(lang config.Language) string {
 	}
 }
 
-// probeArtifact returns a safe artifact name for probe runs.
 func probeArtifact(lang config.Language, srcFilename string) string {
 	if lang.Artifact != "" {
 		return lang.Artifact
 	}
-	// Java: artifact is the class name (filename without extension).
 	ext := filepath.Ext(srcFilename)
 	return strings.TrimSuffix(filepath.Base(srcFilename), ext)
 }
 
-// ProbeLanguage runs a minimal smoke test for a language inside a real jail.
 func ProbeLanguage(lang config.Language) error {
 	jail, err := NewJail()
 	if err != nil {
@@ -410,14 +401,14 @@ func ProbeLanguage(lang config.Language) error {
 	ext := strings.ToLower(filepath.Ext(srcFilename))
 	source, ok := probeSnippets[ext]
 	if !ok {
-		source = "echo ok\n" // safe fallback
+		source = "echo ok\n"
 	}
 
 	if err := jail.WriteSource(srcFilename, source); err != nil {
 		return fmt.Errorf("probe write failed: %w", err)
 	}
 
-	if lang.Build != nil {
+	if lang.Build != nil && lang.Build.Cmd != "" {
 		buildRes, err := runStep(jail, lang.Build, nil, srcFilename, artifact, "")
 		if err != nil {
 			return fmt.Errorf("probe build error: %w", err)

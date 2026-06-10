@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: goboxd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: goboxd
+  template:
+    metadata:
+      labels:
+        app: goboxd
+    spec:
+      containers:
+        - name: goboxd
+          image: goboxd:latest
+          ports:
+            - containerPort: 8080
+          securityContext:
+            privileged: true
