@@ -1,0 +1,35 @@
+services:
+  goboxd:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile
+      target: runtime
+    image: goboxd:dev
+    container_name: goboxd
+    ports:
+      - "8080:8080"
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    restart: unless-stopped
+
+  tools:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile
+      target: tools
+    image: goboxd-tools:dev
+    profiles: ["tools"]
+    working_dir: /src
+    volumes:
+      - ../..:/src
+    tty: true
+    depends_on:
+      - goboxd
+
+networks:
+  default:
+    name: goboxd_network
+    driver: bridge
